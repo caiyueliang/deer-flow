@@ -881,9 +881,9 @@ async def run_agent(
     interrupt_after: list[str] | Literal["*"] | None = None,
     knowledge_scope: dict[str, Any] | None = None,
 ) -> None:
-    """Execute an agent in the background, publishing events to *bridge*."""
+    """在后台执行智能体，并将事件发布到 *bridge*。"""
 
-    # Unpack infrastructure dependencies from RunContext.
+    # 从 RunContext 中解包基础设施依赖。
     checkpointer = ctx.checkpointer
     store = ctx.store
     event_store = ctx.event_store
@@ -915,15 +915,13 @@ async def run_agent(
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
-    # Message ids checkpointed *before* this run started. The stream loop uses
-    # this set to mask out ``deerflow_error_fallback`` markers that belong to
-    # earlier runs on the same thread — without it, one stale fallback in
-    # history would mark every subsequent run on this thread as ``error``.
+    # 在本次运行开始*之前*已写入检查点的消息 ID。流循环使用此集合屏蔽属于
+    # 同一线程更早运行的 ``deerflow_error_fallback`` 标记——否则历史记录中
+    # 的一个过期 fallback 会将该线程后续的每次运行都标记为 ``error``。
     pre_existing_message_ids: set[str] = set()
 
-    # Bound agent graph accessor + captured pre-run rollback point; assigned
-    # inside the try block so the finally rollback path can fork the pre-run
-    # checkpoint lineage (see below).
+    # 已绑定的智能体图访问器和已捕获的运行前回滚点；在 try 块中赋值，
+    # 这样 finally 中的回滚路径就能派生运行前的检查点谱系（见下文）。
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
@@ -935,16 +933,14 @@ async def run_agent(
     delivery_content: dict[str, Any] | None = None
     goal_completion: _GoalCompletionCandidate | None = None
     produced_output_paths: list[str] | None = None
-    # Journal construction moved ahead of preflight so every terminal run can
-    # emit a receipt. Completion persistence keeps its prior boundary: before
-    # #4272 the journal did not exist until preflight had succeeded, so early
-    # checkpoint failures / cancellation while waiting did not write an empty
-    # completion snapshot into RunStore.
+    # 将日志构造移到预检之前，使每次终止的运行都能生成回执。完成状态的持久化
+    # 仍保持原有边界：在 #4272 之前，日志要等预检成功后才创建，因此早期的
+    # 检查点失败或等待期间被取消时，不会向 RunStore 写入空的完成快照。
     persist_completion = False
     completion_data: dict[str, Any] | None = None
-    # Buffers subagent step events for batched persistence (#3779); assigned once
-    # streaming starts and flushed in the finally block. Pre-bound to None so the
-    # finally is safe even if an exception fires before streaming begins.
+    # 缓冲子智能体步骤事件以便批量持久化（#3779）；流式处理开始后赋值，
+    # 并在 finally 块中刷新。预先设为 None，确保流式处理开始前发生异常时
+    # finally 仍然安全。
     subagent_events: _SubagentEventBuffer | None = None
     started = False
 
@@ -996,11 +992,9 @@ async def run_agent(
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
         lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
-        # Initialize the run-scoped journal before any fallible or cancellable
-        # preflight work. Every terminal run with an event store must reach the
-        # shared finally block with a journal available for its run.delivery
-        # receipt, including checkpoint validation failures and cancellation
-        # while waiting for an earlier run to finish finalizing.
+        # 在任何可能失败或可取消的预检工作之前初始化运行级日志。使用事件存储的
+        # 每次终止运行都必须带着可用于 run.delivery 回执的日志进入共享 finally
+        # 块，包括检查点验证失败，以及等待更早运行完成终结期间被取消的情况。
         if event_store is not None:
             from deerflow.runtime.journal import RunJournal
 
@@ -1012,8 +1006,8 @@ async def run_agent(
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
 
-        # Keep cancellable preflight work under the worker's terminal guard so
-        # cancellation cannot strand a pending RunRecord or stream subscriber.
+        # 将可取消的预检工作置于工作器的终止保护范围内，避免取消操作遗留待处理的
+        # RunRecord 或流订阅者。
         if ctx.mcp_task_repo is not None and record.user_id is not None:
             try:
                 if thread_incarnation is _THREAD_INCARNATION_UNSET:
@@ -1109,9 +1103,8 @@ async def run_agent(
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
-            # Resolved once per run so the pre-run snapshot, the post-run
-            # delivery scan, and the workspace-changes scan all agree on the
-            # same exclusion set.
+            # 每次运行只解析一次，使运行前快照、运行后交付扫描和工作区变更扫描
+            # 使用同一组排除目录。
             workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
                 pre_run_workspace_snapshot = await capture_workspace_snapshot(
@@ -1122,7 +1115,7 @@ async def run_agent(
             except Exception:
                 logger.warning("Could not capture pre-run workspace snapshot for run %s", run_id, exc_info=True)
 
-        # 2. Publish metadata — useStream needs both run_id AND thread_id
+        # 2. 发布元数据——useStream 同时需要 run_id 和 thread_id
         await bridge.publish(
             run_id,
             "metadata",
@@ -1132,14 +1125,13 @@ async def run_agent(
             },
         )
 
-        # 3. Build the agent
+        # 3. 构建智能体
         from langchain_core.runnables import RunnableConfig
         from langgraph.runtime import Runtime
 
-        # Inject runtime context so middlewares and tools (via ToolRuntime.context) can
-        # access thread-level data. langgraph-cli does this automatically; we must do it
-        # manually here because we drive the graph through ``agent.astream(config=...)``
-        # without passing the official ``context=`` parameter.
+        # 注入运行时上下文，使中间件和工具（通过 ToolRuntime.context）能够访问线程级
+        # 数据。langgraph-cli 会自动完成此操作；这里通过 ``agent.astream(config=...)``
+        # 驱动图，未传入官方的 ``context=`` 参数，因此必须手动完成。
         runtime_ctx = _build_runtime_context(
             thread_id,
             run_id,
@@ -1150,11 +1142,9 @@ async def run_agent(
             ctx.conversation_reader,
             thread_incarnation=thread_incarnation,
         )
-        # Bind every checkpoint produced by this run to the effective agent
-        # identity that produced its state. Manual compaction uses only this
-        # server-overwritten value for memory policy; request metadata cannot
-        # forge it, and an explicit default sentinel distinguishes new default
-        # checkpoints from unbound legacy state.
+        # 将本次运行产生的每个检查点绑定到生成其状态的有效智能体身份。手动压缩时，
+        # 内存策略只使用这个由服务器覆盖的值；请求元数据无法伪造它，显式的默认
+        # 占位符也能区分新的默认检查点和未绑定的旧状态。
         if "agent_name" in runtime_ctx:
             checkpoint_agent_name = runtime_ctx["agent_name"]
         else:
@@ -1169,23 +1159,22 @@ async def run_agent(
         if knowledge_scope is not None:
             runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
         deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
-        # Expose the run-scoped journal under a sentinel key so middleware can
-        # write audit events (e.g. SafetyFinishReasonMiddleware recording
-        # suppressed tool calls). Double-underscore prefix marks it as a
-        # runtime-internal channel; user code must not depend on the key name.
+        # 将运行级日志通过占位键暴露出来，使中间件能够写入审计事件（例如
+        # SafetyFinishReasonMiddleware 记录被抑制的工具调用）。双下划线前缀表示
+        # 这是运行时内部通道；用户代码不得依赖该键名。
         if journal is not None:
             runtime_ctx["__run_journal"] = journal
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
 
-        # Inject RunJournal as a LangChain callback handler.
-        # on_llm_end captures token usage; on_chain_start/end captures lifecycle.
+        # 将 RunJournal 注入为 LangChain 回调处理器。
+        # on_llm_end 捕获 token 使用量；on_chain_start/end 捕获生命周期。
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
 
-        # Resolve after runtime context installation so context/configurable reflect
-        # the agent name that this run will actually execute.
+        # 在安装运行时上下文后解析，使 context/configurable 反映本次运行实际执行的
+        # 智能体名称。
         config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
         initial_runnable_config = RunnableConfig(**config)
         runnable_configs.append(initial_runnable_config)
@@ -1207,15 +1196,13 @@ async def run_agent(
         from deerflow.extensions import bind_agent_build_extensions
 
         with bind_agent_build_extensions(extensions):
-            # Assemble off-loop: agent construction re-enters
-            # get_available_tools(), which may block on MCP cache
-            # initialization — it must not stall the calling event loop
-            # (issue #5172).
+            # 在线程池之外完成组装：构建智能体会再次进入 get_available_tools()，
+            # 该调用可能阻塞于 MCP 缓存初始化，因此不能阻塞调用方事件循环（issue #5172）。
             agent_result = await run_assembly(agent_factory, **agent_factory_kwargs)
             agent = _agent_graph(agent_result)
 
-        # Assembly resolves request, agent, and authorization fallbacks. Trace the
-        # model that will run, rather than the model name originally requested.
+        # 组装过程会解析请求、智能体和授权的 fallback。应追踪实际运行的模型，
+        # 而不是最初请求的模型名称。
         effective_model = _assembled_model_name(agent_result) or record.model_name
         for trace_config in (config, initial_runnable_config):
             inject_langfuse_metadata(
@@ -1235,18 +1222,13 @@ async def run_agent(
             mode=mode,
         )
 
-        # Capture the pre-run rollback point (materialized state + raw pending
-        # writes) before this run mutates the thread. Raw checkpoint blobs
-        # cannot reconstruct Delta-channel messages (their checkpoints omit
-        # channel_values), so rollback forks the pre-run lineage through the
-        # graph and needs the materialized messages up front. Any capture
-        # failure disables rollback: restoring an empty or partial message
-        # history would silently truncate the thread.
+        # 在本次运行修改线程之前捕获运行前回滚点（已物化状态 + 原始待处理写入）。
+        # 原始检查点 blob 无法重建 Delta 通道消息（其检查点省略 channel_values），
+        # 因此回滚需要通过图派生运行前谱系，并预先取得已物化消息。捕获失败会禁用
+        # 回滚：恢复为空或不完整的消息历史会悄悄截断线程。
         if checkpointer is not None:
-            # A previous successful run may still be persisting duration
-            # metadata after its active admission slot is released. Share its
-            # checkpoint lock so the rollback snapshot and any resume rewrite
-            # are one uninterrupted read/write sequence against the head.
+            # 之前成功的运行在释放活动准入槽后，可能仍在持久化时长元数据。共享其
+            # 检查点锁，使回滚快照和任何恢复重写针对头部组成一个不中断的读写序列。
             async with _checkpoint_thread_lock(thread_id):
                 try:
                     rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
@@ -1257,11 +1239,9 @@ async def run_agent(
                     pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
                     pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
 
-                # Resuming from an older checkpoint is a fork, and a delta fork
-                # materializes the abandoned sibling's writes back into state
-                # (#4458). Rewrite it as a linear head write *after* the rollback
-                # point is captured, so cancel-with-rollback still restores the
-                # real pre-run head rather than the rolled-back one.
+                # 从较旧检查点恢复会创建一个分支，而 Delta 分支会将已放弃兄弟分支的
+                # 写入重新物化到状态中（#4458）。在捕获回滚点*之后*将其重写为线性的
+                # 头部写入，使“取消并回滚”仍恢复真正的运行前头部，而不是回滚后的头部。
                 resumed_messages = await _linearize_delta_checkpoint_resume(
                     accessor=accessor,
                     checkpointer=checkpointer,
@@ -1270,9 +1250,8 @@ async def run_agent(
                     run_id=run_id,
                 )
             if resumed_messages is not None:
-                # The graph now starts from the selected state, so the
-                # current-run message boundary is that state, not the head we
-                # captured for rollback.
+                # 图现在从选定状态开始，因此本次运行的消息边界是该状态，而不是我们
+                # 为回滚捕获的头部。
                 pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(resumed_messages)})
                 initial_runnable_config = RunnableConfig(**config)
                 runnable_configs.append(initial_runnable_config)
@@ -1280,10 +1259,9 @@ async def run_agent(
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)
 
-        # Capture the effective (resolved) model name from the agent's metadata.
-        # _resolve_model_name in agent.py may return the default model if the
-        # requested name is not in the allowlist — this update ensures the
-        # persisted model_name reflects the actual model used.
+        # 从智能体元数据中获取有效（已解析）的模型名称。
+        # agent.py 中的 _resolve_model_name 在请求名称不在允许列表中时可能返回默认模型，
+        # 此更新确保持久化的 model_name 反映实际使用的模型。
         if record.model_name is not None:
             resolved = getattr(agent, "metadata", {}) or {}
             if isinstance(resolved, dict):
@@ -1291,13 +1269,13 @@ async def run_agent(
                 if effective and effective != record.model_name:
                     await run_manager.update_model_name(record.run_id, effective)
 
-        # 4. Attach checkpointer and store
+        # 4. 挂载检查点器和存储
         if checkpointer is not None:
             agent.checkpointer = checkpointer
         if store is not None:
             agent.store = store
 
-        # 5. Set interrupt nodes
+        # 5. 设置中断节点
         if interrupt_before:
             agent.interrupt_before_nodes = interrupt_before
         if interrupt_after:
@@ -1305,9 +1283,9 @@ async def run_agent(
 
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
-        # Buffer subagent step events and persist them in batches (#3779) instead
-        # of one low-frequency put() per step on the hot stream loop. Flushed in
-        # the finally block so buffered steps survive abort/exception paths too.
+        # 缓冲子智能体步骤事件并批量持久化（#3779），而不是在高频流循环中每一步
+        # 调用一次低频 put()。在 finally 块中刷新，确保中止或异常路径中的缓冲步骤
+        # 也能保留下来。
         subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id)
 
         def _get_goal_evaluator_model() -> Any:
@@ -1319,8 +1297,8 @@ async def run_agent(
                 )
             return goal_evaluator_model
 
-        # Built once per run, not per _stream_once call: goal continuations
-        # re-enter the stream and would otherwise discard the resolved seqs.
+        # 每次运行只构建一次，而不是每次调用 _stream_once 都构建：目标延续会重新进入
+        # 流，否则会丢弃已解析的序列号。
         seq_stamper = _build_seq_stamper(event_store, thread_id, journal) if "values" in requested_modes else None
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
@@ -1329,7 +1307,7 @@ async def run_agent(
             try:
                 async with _checkpoint_thread_lock(thread_id):
                     if len(lg_modes) == 1 and not stream_subgraphs:
-                        # Single mode, no subgraphs: astream yields raw chunks
+                        # 单一模式且没有子图：astream 产生原始块
                         single_mode = lg_modes[0]
                         stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
                         broke_on_abort = False
@@ -1340,8 +1318,8 @@ async def run_agent(
                                     logger.info("Run %s abort requested — stopping", run_id)
                                     break
                                 if single_mode != "custom":
-                                    # Custom frames carry task_* events whose payload can hold a delegated
-                                    # subagent's messages; see the multi-mode branch below.
+                                    # 自定义帧携带 task_* 事件，其载荷可能包含委派的子智能体消息；
+                                    # 详见下方的多模式分支。
                                     llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                                 sse_event = _lg_mode_to_sse_event(single_mode)
                                 single_payload = serialize(chunk, mode=single_mode)
@@ -1370,7 +1348,7 @@ async def run_agent(
                                 else:
                                     logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
                         return
-                    # Multiple modes or subgraphs: astream yields tuples
+                    # 多模式或包含子图：astream 产生元组
                     stream = agent.astream(
                         input_payload,
                         config=stream_config,
@@ -1390,11 +1368,9 @@ async def run_agent(
                                 continue
 
                             if not namespace and mode != "custom":
-                                # Only root-graph frames may decide the parent run's error
-                                # fallback: a delegated subagent's marked fallback is the
-                                # executor's to map (task_failed), not this run's. That
-                                # includes the child messages task_running custom events
-                                # carry, which are root frames too.
+                                # 只有根图帧可以决定父运行的错误 fallback：委派子智能体标记的
+                                # fallback 应由执行器映射（task_failed），而不是由本次运行映射。
+                                # 这也包括 task_running 自定义事件携带的子消息，因为它们同样是根帧。
                                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                             await _publish_stream_item(
                                 bridge=bridge,
@@ -1436,11 +1412,10 @@ async def run_agent(
                             raise
                         logger.debug("Could not flush pending file-tool chunks for run %s", run_id, exc_info=True)
 
-        # 7. Stream the requested turn, then optionally continue hidden goal turns.
-        # Clear any stale stop_reason before the first (user-visible) turn only.
-        # Continuation turns preserve a cap reason from the user turn: a run that
-        # hits a cap during the user turn IS capped even if hidden goal-evaluator
-        # turns complete cleanly afterward (#4176 review).
+        # 7. 流式处理请求的轮次，然后按需继续执行隐藏的目标轮次。
+        # 仅在第一个（用户可见）轮次之前清除过期的 stop_reason。
+        # 延续轮次保留用户轮次产生的上限原因：即使隐藏的目标评估器轮次随后正常完成，
+        # 用户轮次触及上限的运行仍然算作达到上限（#4176 review）。
         if isinstance(runtime.context, dict):
             runtime.context.pop("stop_reason", None)
         await _stream_once(graph_input, initial_runnable_config)
@@ -1468,7 +1443,7 @@ async def run_agent(
                 break
             await _stream_once(continuation_input, _continuation_runnable_config())
 
-        # 8. Final status
+        # 8. 最终状态
         if record.abort_event.is_set():
             await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
@@ -1487,20 +1462,18 @@ async def run_agent(
                 await _finish_cancellation(cancel_action)
         else:
             runtime_context = runtime.context if isinstance(runtime.context, dict) else None
-            # Guard middlewares that hard-stop a run by stripping tool_calls
-            # stamp stop_reason into runtime.context so the worker can surface
-            # it on the run record:
+            # 通过移除 tool_calls 强制停止运行的保护中间件，会将 stop_reason 写入
+            # runtime.context，使工作器能够在运行记录中呈现该原因：
             #   loop_detection      -> "loop_capped"
             #   token_budget        -> "token_capped"
             #   safety_finish_reason -> "safety_capped"
             #   subagent_limit       -> "subagent_limit_capped"
             #   model_length_finish_reason -> "model_length_capped"
             #
-            # If more guards grow stop_reason semantics, consider a publish/
-            # collect pattern (e.g. each guard middleware publishes its cap
-            # reason to a dedicated runtime.context channel, and the worker
-            # collects the most severe / first / all reasons) instead of each
-            # guard writing directly to the same key.
+            # 如果更多保护机制扩展 stop_reason 的语义，可以考虑发布/收集模式
+            #（例如每个保护中间件将上限原因发布到专用的 runtime.context 通道，
+            # 再由工作器收集最严重的、首个或全部原因），而不是让每个保护机制
+            # 直接写入同一个键。
             stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
             produced_output_paths = await _produced_output_paths(
                 pre_run_workspace_snapshot,
@@ -1580,8 +1553,8 @@ async def run_agent(
                 except Exception:
                     logger.warning("Run %s edit replay rollback failed", run_id, exc_info=True)
 
-            # Persist any subagent step events still buffered (#3779) — including on
-            # abort/exception paths, where the stream loop broke before its own flush.
+            # 持久化仍在缓冲中的子智能体步骤事件（#3779）——包括中止或异常路径，
+            # 此时流循环可能在自行刷新之前就已中断。
             if not record.ownership_lost and subagent_events is not None:
                 await subagent_events.flush()
 
@@ -1598,11 +1571,9 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
 
-            # Flush buffered journal events before the terminal receipt. The
-            # receipt uses a run-scoped idempotent write shared with recovery, then
-            # the staged terminal status is persisted. This ordering closes the
-            # crash window where a terminal run could otherwise outlive its receipt.
-            # A fenced worker leaves receipt recovery to the peer that claimed it.
+            # 在终止回执之前刷新缓冲的日志事件。回执使用与恢复共享的运行级幂等写入，
+            # 然后持久化暂存的终止状态。该顺序消除了终止运行可能先于其回执结束的
+            # 崩溃窗口。被栅栏隔离的工作器将回执恢复交给已认领它的对等工作器。
             if not record.ownership_lost and journal is not None:
                 try:
                     await journal.flush()
@@ -1634,25 +1605,22 @@ async def run_agent(
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:
-                    # Advance the final completion fields and timestamp without
-                    # terminalizing the durable row. That active row continues to
-                    # fence peer checkpoint writers through the duration write.
+                    # 更新最终完成字段和时间戳，但不将持久化记录置为终止状态。该活动记录
+                    # 会在时长写入期间继续阻止对等工作器写入检查点。
                     completion_data = journal.get_completion_data()
                     await run_manager.update_finalizing_progress(run_id, **completion_data)
                 except Exception:
                     logger.warning("Failed to persist finalizing run progress for %s (non-fatal)", run_id, exc_info=True)
 
-            # Keep the durable run row active through its final duration checkpoint
-            # write. A peer Gateway admits history migration from the durable row,
-            # not this worker's staged terminal status; terminalizing first would
-            # let that migration read an unfinished lifetime and race this write.
+            # 在最终的运行时长检查点写入完成前，保持持久化运行记录为活动状态。对等
+            # Gateway 从持久化记录（而不是本工作器暂存的终止状态）执行历史迁移；
+            # 若先置为终止状态，迁移就可能读取未完成的生命周期并与此写入竞争。
             if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
                 try:
                     created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
                     updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
-                    # Match legacy history semantics: turn_duration is the whole
-                    # RunRecord lifetime in integer seconds, including admission
-                    # delay. Persist zero for sub-second successful turns.
+                    # 遵循旧版历史语义：turn_duration 是整个 RunRecord 生命周期的整数秒数，
+                    # 包括准入延迟。成功轮次若不足一秒，则持久化为零。
                     duration = max(0, int((updated - created).total_seconds()))
                     await _persist_run_duration(
                         checkpointer=checkpointer,
@@ -1665,10 +1633,9 @@ async def run_agent(
 
             if not record.ownership_lost and event_store is not None:
                 try:
-                    # Even after bounded receipt retries are exhausted, persist the
-                    # real worker outcome. Leaving a successful row inflight would
-                    # let lease recovery rewrite it as an error with a synthetic
-                    # zero receipt.
+                    # 即使有限次数的回执重试已耗尽，也要持久化工作器的真实结果。若让
+                    # 成功记录保持 inflight 状态，租约恢复可能会将其改写为错误，并附带
+                    # 一个合成的零回执。
                     if record.abort_event.is_set():
                         await run_manager.persist_current_status(run_id)
                     else:
@@ -1686,16 +1653,15 @@ async def run_agent(
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:
-                    # Persist token usage + convenience fields to RunStore
+                    # 将 token 使用量和便捷字段持久化到 RunStore
                     completion_data = completion_data or journal.get_completion_data()
                     await run_manager.update_run_completion(run_id, status=record.status.value, **completion_data)
                 except Exception:
                     logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-            # A satisfied evaluator is only a candidate until artifact delivery,
-            # receipt persistence and durable cancellation arbitration have ended.
-            # Status writes are best-effort in single-worker mode: confirm the
-            # existing outcome before deleting recoverable goal state.
+            # 评估器判定满足条件后，在产物交付、回执持久化和持久化取消仲裁结束前，
+            # 仍然只是候选项。单工作器模式下，状态写入是尽力而为的：删除可恢复的
+            # 目标状态前，先确认现有结果。
             if goal_completion is not None and record.status == RunStatus.success and not record.abort_event.is_set() and not record.ownership_lost:
                 try:
                     if await run_manager.persist_current_status(run_id):
@@ -1718,7 +1684,7 @@ async def run_agent(
                 except Exception:
                     logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
-            # Sync title from checkpoint to threads_meta.display_name
+            # 将检查点中的标题同步到 threads_meta.display_name
             if started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
                 try:
                     ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -1731,7 +1697,7 @@ async def run_agent(
                 except Exception:
                     logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
 
-            # Update threads_meta status based on run outcome
+            # 根据运行结果更新 threads_meta 状态
             if started and not record.ownership_lost and thread_store is not None:
                 try:
                     final_status = "idle" if record.status == RunStatus.success else record.status.value
@@ -1745,8 +1711,7 @@ async def run_agent(
                 except Exception:
                     logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
                 except BaseException as exc:
-                    # A terminal hook must not leave replacement runs blocked or
-                    # stream consumers waiting indefinitely.
+                    # 终止钩子不得让替代运行一直被阻塞，也不得让流消费者无限等待。
                     deferred_finalization_interrupt = _defer_finalization_interrupt(
                         deferred_finalization_interrupt,
                         exc,
@@ -1757,8 +1722,8 @@ async def run_agent(
                     )
 
             if task_info is not None and task_store is not None:
-                # Keep the finalizing barrier held until stop observers finish, so
-                # a same-thread replacement cannot overlap this task's lifecycle.
+                # 保持终结屏障，直到停止观察者完成，避免同线程的替代运行与本任务的
+                # 生命周期重叠。
                 task_stop = asyncio.create_task(
                     notify_task_stop(
                         extensions,
@@ -1784,8 +1749,7 @@ async def run_agent(
                         exc_info=True,
                     )
                 except BaseException as exc:
-                    # Cancellation here must not strand the finalizing barrier or
-                    # leave stream consumers waiting for the end frame.
+                    # 此处的取消不得遗留终结屏障，也不得让流消费者等待结束帧。
                     deferred_finalization_interrupt = _defer_finalization_interrupt(
                         deferred_finalization_interrupt,
                         exc,
@@ -1817,9 +1781,8 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to release sandbox execution lease for run %s", run_id, exc_info=True)
                 except BaseException as exc:
-                    # release_async completes the underlying cleanup before it
-                    # re-raises cancellation. Defer that interruption until the
-                    # worker has dropped all other run-scoped references too.
+                    # release_async 会先完成底层清理，再重新抛出取消异常。将该中断
+                    # 延后，直到工作器也丢弃其他所有运行级引用之后再处理。
                     lease_cleanup_interrupt = exc
                     logger.warning(
                         "Sandbox execution lease cleanup was interrupted for run %s; completing local cleanup first",
@@ -1831,8 +1794,7 @@ async def run_agent(
                         runtime_ctx,
                         journal,
                     )
-                # Drop graph and per-run payload references before the terminal
-                # worker task itself becomes collectable.
+                # 在终止工作器任务本身可被回收之前，丢弃图和每次运行的载荷引用。
                 agent = None
                 agent_result = None
                 accessor = None
@@ -1849,13 +1811,10 @@ async def run_agent(
                 produced_output_paths = None
                 graph_input = {}
 
-                # Durable finalization and terminal publication may depend on
-                # external backends, but local housekeeping must always run.
+                # 持久化终结和终止发布可能依赖外部后端，但本地收尾工作必须始终执行。
                 _create_contextless_task(bridge.cleanup(run_id, delay=60))
-                # Preserve the existing five-minute grace period for local
-                # join/status paths, then release the terminal record, completed
-                # task, and request payload. Durable run history remains available
-                # through RunStore.
+                # 为本地 join/status 路径保留现有的五分钟宽限期，然后释放终止记录、
+                # 已完成任务和请求载荷。持久化运行历史仍可通过 RunStore 获取。
                 _create_contextless_task(run_manager.cleanup(run_id))
                 _schedule_terminal_cycle_collection()
 
