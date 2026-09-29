@@ -1682,27 +1682,25 @@ async def start_run(
     idempotency_key: str | None = None,
     require_existing_thread: bool = False,
 ) -> RunRecord:
-    """Create a RunRecord and launch the background agent task.
+    """创建 RunRecord 并启动后台智能体任务。
 
-    Parameters
+    参数
     ----------
     body : RunCreateRequest
-        The validated request body shared by HTTP and internal launch paths.
+        由 HTTP 和内部启动路径共用的、已验证的请求体。
     thread_id : str
-        Target thread.
+        目标线程。
     request : Request
-        FastAPI request — used to retrieve singletons from ``app.state``.
+        FastAPI 请求——用于从 ``app.state`` 获取单例对象。
     require_existing_thread : bool
-        Reject a missing thread instead of auto-creating metadata. Internal
-        notification runs use this so a deleted chat cannot be resurrected.
+        拒绝不存在的线程，而不是自动创建元数据。内部通知运行使用此选项，
+        以避免已删除的聊天被重新创建。
     """
-    # Cancel-capability gate. interrupt/rollback strategies terminate an already
-    # active run — runs:cancel capability, not runs:create — so a create-only
-    # PAT must not reach them. Enforced here, the single choke point every
-    # run-creation path flows through (HTTP routes and internal launchers
-    # alike), so no entry point can bypass it; regenerate launches pass
-    # multitask_strategy="reject" and are unaffected. Requests without a
-    # stamped auth context (internal/test compositions) skip the gate.
+    # 取消能力门禁。interrupt/rollback 策略会终止已处于活动状态的运行，所需的是
+    # runs:cancel 能力而不是 runs:create，因此仅具备创建权限的 PAT 不得进入这些路径。
+    # 门禁在此处执行；这是所有运行创建路径（包括 HTTP 路由和内部启动器）经过的唯一
+    # 关口，因此任何入口都无法绕过它。重新生成请求传入 multitask_strategy="reject"，
+    # 不受此门禁影响。没有带认证上下文的请求（内部/测试组合）会跳过门禁。
     require_cancel_permission_if(request, body.multitask_strategy != "reject")
 
     try:
@@ -1727,11 +1725,11 @@ async def start_run(
 
     body_context = getattr(body, "context", None) or {}
     model_name = body_context.get("model_name")
-    # Coerce non-string model_name values to str before truncation.
+    # 在截断前将非字符串的 model_name 值强制转换为字符串。
     if model_name is not None and not isinstance(model_name, str):
         model_name = str(model_name)
 
-    # Validate model against the allowlist when a model_name is provided.
+    # 提供 model_name 时，根据允许列表验证模型。
     if model_name:
         app_config = get_app_config()
         resolved = app_config.get_model_config(model_name)
@@ -1742,18 +1740,14 @@ async def start_run(
             )
 
     owner_user_id = get_trusted_internal_owner_user_id(request)
-    # Stateless run endpoints carry thread_id in the request *body*, so the
-    # @require_permission(owner_check=True) decorator -- which resolves ownership
-    # from the path param -- cannot protect them. Enforce thread ownership here,
-    # before any run is created, so one user cannot start runs on (or read /wait
-    # checkpoint state from) another user's thread. Missing rows (auto-created
-    # temp threads) and NULL-owner rows (shared / pre-auth data) stay accessible
-    # via check_access; only a thread already owned by another user is rejected
-    # with 404, matching thread_runs.py's anti-enumeration behaviour. Internal
-    # channel runs act on behalf of the connection owner carried in
-    # X-DeerFlow-Owner-User-Id, so they are scoped to that owner instead of
-    # bypassing the check -- a leaked internal token must not grant cross-user
-    # thread access.
+    # 无状态运行端点将 thread_id 放在请求的 *body* 中，因此
+    # @require_permission(owner_check=True) 装饰器无法保护它们——该装饰器通过路径参数
+    # 解析所有权。这里在创建任何运行之前强制执行线程所有权，避免一个用户在另一个
+    # 用户的线程上启动运行，或读取该线程的 /wait 检查点状态。缺失的记录（自动创建的
+    # 临时线程）和所有者为 NULL 的记录（共享/预认证数据）仍可通过 check_access 访问；
+    # 只有已属于其他用户的线程才会返回 404，这与 thread_runs.py 的防枚举行为一致。
+    # 内部通道运行代表 X-DeerFlow-Owner-User-Id 中携带的连接所有者执行，因此会限定在
+    # 该所有者的范围内，而不是绕过检查——泄露的内部令牌不得授予跨用户线程访问权限。
     user = getattr(request.state, "user", None)
 
     async def thread_access_allowed() -> bool:
@@ -1767,9 +1761,8 @@ async def start_run(
             require_existing=require_existing_thread,
         )
         if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
-            # Channel workers may also act for the connection owner named in
-            # the trusted header (e.g. claiming a legacy default-owned channel
-            # thread for its real owner).
+            # 通道工作器也可以代表可信请求头中指定的连接所有者执行（例如，为真正的
+            # 所有者认领一个旧版默认所有者拥有的通道线程）。
             allowed = await run_ctx.thread_store.check_access(
                 thread_id,
                 owner_user_id,
@@ -1783,8 +1776,8 @@ async def start_run(
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
-        # Validate even when resume takes precedence, so ignored input cannot
-        # appear to have been admitted or persist as unchecked run audit data.
+        # 即使 resume 优先，也要执行验证，避免被忽略的输入看起来像已被接纳，或作为
+        # 未检查的运行审计数据持久化。
         normalized_input = normalize_input(body.input, trusted_internal=is_internal_caller)
         agent_factory = resolve_agent_factory(body.assistant_id)
         command = getattr(body, "command", None)
@@ -1792,28 +1785,26 @@ async def start_run(
             graph_input = Command(resume=command["resume"])
         else:
             graph_input = normalized_input
-        # deerflow_trace_id is server-issued, so the caller's value is replaced
-        # here at the trust boundary. body.metadata forks two ways -- through
-        # build_run_config into config["metadata"], which the run worker
-        # restamps, and through create_or_reject into the run record, which the
-        # runs API echoes verbatim. Only the first is covered downstream, so
-        # without this the run record is the one surface that persists a forged
-        # id, disagreeing with the response header, the logs, and the
-        # checkpoint. The caller's own metadata keys are preserved.
+        # deerflow_trace_id 由服务器签发，因此在信任边界处替换调用方提供的值。
+        # body.metadata 会沿两条路径分流：一条经由 build_run_config 进入
+        # config["metadata"]，由运行工作器重新写入；另一条经由 create_or_reject 进入
+        # 运行记录，并由 runs API 原样返回。下游只覆盖了第一条路径，因此没有这一步，
+        # 运行记录就会成为唯一持久化伪造 ID 的表面，与响应头、日志和检查点不一致。
+        # 调用方自己的元数据键会被保留。
         run_metadata = dict(body.metadata) if isinstance(body.metadata, dict) else {}
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
 
         config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
-        # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
-        # The ``context`` field is a custom extension for the langgraph-compat layer
-        # that carries agent configuration (model_name, thinking_enabled, etc.).
-        # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
+        # 将 DeerFlow 特有的上下文覆盖项合并到 ``configurable`` 和 ``context``。
+        # ``context`` 字段是 langgraph-compat 层的自定义扩展，用于携带智能体配置
+        # （model_name、thinking_enabled 等）。只转发与智能体相关的键，忽略未知键
+        # （例如 thread_id）。
         merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
         if not is_internal_caller:
-            # ``body.config`` is free-form and copied verbatim by
-            # ``build_run_config``; scrub internal-only keys smuggled there.
+            # ``body.config`` 是自由格式，并会被 ``build_run_config`` 原样复制；
+            # 清除其中夹带的仅限内部使用的键。
             strip_internal_context_keys(config)
 
         replay_kind = run_metadata.get("replay_kind")
@@ -1823,11 +1814,9 @@ async def start_run(
         current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
         replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
         is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
-        # Clarification and edit-replay messages may intentionally replace the
-        # source scope. If either client omits its current selector snapshot,
-        # inherit the source turn's authoritative scope instead of widening the
-        # run to every operator-approved dataset. Other replay paths always use
-        # server recovery regardless of client input.
+        # 澄清消息和编辑重放消息可能有意替换源范围。如果客户端遗漏当前选择器快照，
+        # 则继承源轮次的权威范围，而不是将运行扩大到操作员批准的所有数据集。
+        # 其他重放路径始终使用服务器恢复结果，不受客户端输入影响。
         is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
         recovery_scope = (
             await _recover_run_knowledge_scope(
@@ -1838,15 +1827,15 @@ async def start_run(
             if is_scope_recovery
             else None
         )
-        # Match lead-agent assembly: runtime context overrides configurable.
-        # Older API/channel callers may name an agent through context while
-        # retaining lead_agent as their routing assistant ID.
+        # 与 lead-agent 组装保持一致：运行时上下文覆盖 configurable。
+        # 较旧的 API/通道调用方可能通过 context 指定智能体，同时保留 lead_agent 作为
+        # 路由 assistant ID。
         scope_runtime_config = dict(config.get("configurable") or {})
         if isinstance(config.get("context"), dict):
             scope_runtime_config.update(config["context"])
         scope_assistant_id = scope_runtime_config.get("agent_name") or _DEFAULT_ASSISTANT_ID
-        # Bootstrap assembly intentionally does not load an agent config: the
-        # new agent may not exist yet and setup_agent creates its definition.
+        # 引导组装有意不加载智能体配置：新智能体可能尚不存在，且 setup_agent 会创建
+        # 其定义。
         agent_config = (
             await _load_scope_agent_config(
                 assistant_id=scope_assistant_id,
@@ -1855,9 +1844,8 @@ async def start_run(
             if not scope_runtime_config.get("is_bootstrap")
             else None
         )
-        # Keep the pre-default identity even when the agent is initially
-        # unbound: adding a default must not reject an already-accepted retry.
-        # The durable input still exposes the original accepted scope.
+        # 即使智能体最初未绑定，也保留应用默认值之前的身份：添加默认值不得拒绝已经
+        # 接受的重试请求。持久化输入仍然暴露最初接受的范围。
         request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
         knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
         accepts_knowledge_default = not is_scope_recovery and not current_message_has_scope and knowledge_default_request_hash is not None
@@ -1900,18 +1888,16 @@ async def start_run(
             reader, source_ids = prepared
             run_ctx = replace(run_ctx, conversation_reader=reader)
             if isinstance(graph_input, dict):
-                # Keep this endpoint's list-only wire contract even though
-                # message admission canonicalizes single-message shorthand.
+                # 即使消息接纳会将单消息简写规范化，也要保持此端点仅允许列表的线协议。
                 raw_messages = (body.input or {}).get("messages")
                 if raw_messages is not None and not isinstance(raw_messages, list):
                     raise HTTPException(status_code=422, detail="input.messages must be a list")
                 reference_messages = graph_input.get("messages")
                 if reference_messages is None:
                     reference_messages = []
-                # ``normalize_input`` guarantees a list here. The raw-input
-                # check above is the authoritative list-only wire validation.
-                # Reference IDs are user-selected data. Keep them out of the
-                # system prompt and grant no authority from this persisted hint.
+                # ``normalize_input`` 保证这里是列表。上面的原始输入检查是仅列表线协议
+                # 验证的权威来源。引用 ID 是用户选择的数据；不要将其放入系统提示词，
+                # 也不要从这个持久化提示中授予任何权限。
                 graph_input = {
                     **graph_input,
                     "messages": [
@@ -1922,11 +1908,9 @@ async def start_run(
                         ),
                     ],
                 }
-        # Resolve and pin the thread's project context once per run (spec
-        # §7.1): middlewares and tools read only this server-owned snapshot —
-        # nothing re-resolves membership mid-run, and admission never writes
-        # membership (§10.7). Resolution failure degrades to unassigned with a
-        # warning inside the resolver; it never fails the run.
+        # 每次运行解析并固定线程的项目上下文（规范 §7.1）：中间件和工具只读取这个
+        # 服务器拥有的快照——运行期间不会重新解析成员关系，接纳过程也不会写入成员
+        # 关系（§10.7）。解析失败时，解析器会记录警告并降级为未分配；不会使运行失败。
         project_context = await resolve_project_context(
             run_ctx.thread_store,
             getattr(request.app.state, "project_repo", None),
@@ -2009,10 +1993,8 @@ async def start_run(
                     record.run_id,
                     error=str(metadata_failure),
                 )
-            # Continue through run_agent even after metadata abort, timeout,
-            # or strict verification failure:
-            # its startup barrier is the single path that turns pending
-            # cancellation into no-agent-construction plus publish_end.
+            # 即使元数据操作中止、超时或严格验证失败，也要继续进入 run_agent：
+            # 其启动屏障是将待处理取消转换为“不构建智能体并发布 publish_end”的唯一路径。
             incarnation_kwargs: dict[str, str | None] = {}
             if metadata_record is None:
                 if not record.abort_event.is_set():
@@ -2058,12 +2040,10 @@ async def start_run(
                     thread_id=thread_id,
                     assistant_id=body.assistant_id,
                 )
-                # A strict caller may have observed the thread before a
-                # concurrent delete removed it while checkpoint preparation
-                # yielded. Recheck immediately before durable admission. The
-                # delete route holds a durable thread-operation reservation,
-                # so after this point either the run or the delete wins; they
-                # cannot both succeed across Gateway workers.
+                # 严格调用方可能在检查点准备让出控制权期间观察到线程，但并发删除随后
+                # 将其移除。因此要在持久化接纳前立即重新检查。删除路由持有持久化的
+                # 线程操作保留，因此从此处开始运行和删除只有一个能获胜；二者不可能
+                # 在不同 Gateway 工作器上同时成功。
                 if require_existing_thread and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
                 record = await run_mgr.create_or_reject(
@@ -2071,10 +2051,9 @@ async def start_run(
                     body.assistant_id,
                     on_disconnect=disconnect,
                     metadata=run_metadata,
-                    # Persist a secret-redacted copy of the config: the run record is
-                    # written to runs.kwargs_json and echoed by the run API, so a
-                    # request-scoped secret (#3861) must not ride along. The live
-                    # config built above keeps the secrets for the actual run.
+                    # 持久化经过密钥脱敏的配置副本：运行记录会写入 runs.kwargs_json，
+                    # 并由运行 API 返回，因此请求范围内的密钥（#3861）不得随记录保存。
+                    # 上面构建的实时配置仍为实际运行保留这些密钥。
                     kwargs={
                         "input": run_record_input,
                         **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
@@ -2090,16 +2069,12 @@ async def start_run(
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
                     stored_input = stored.get("input")
-                    # New runs persist the admitted, canonical message snapshot
-                    # so a scope display cannot be rewritten through the run
-                    # record. Accept the raw request as well for records written
-                    # by older Gateway versions, while comparing canonical
-                    # retries to the same representation as the stored record.
+                    # 新运行持久化已接纳的规范化消息快照，使范围显示无法通过运行记录被
+                    # 改写。对于旧版 Gateway 写入的记录，也接受原始请求；同时将规范化
+                    # 重试与存储记录使用相同的表示进行比较。
                     matches_default_request = knowledge_default_request_hash is not None and stored.get("knowledge_default_request_hash") == knowledge_default_request_hash
-                    # Pre-feature unscoped records may already contain normalized
-                    # messages, but have no digest. Compare them before injecting
-                    # today's default; explicit scopes and recovery do not use
-                    # this compatibility path.
+                    # 功能上线前的无范围记录可能已经包含规范化消息，但没有摘要。注入
+                    # 今天的默认范围前先比较这些记录；显式范围和恢复路径不使用此兼容路径。
                     matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
                     matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == run_record_input
                     if not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
@@ -2111,11 +2086,9 @@ async def start_run(
 
                 worker = run_after_metadata(record)
                 try:
-                    # No await is allowed between durable admission and task
-                    # attachment. Metadata setup runs inside the attached
-                    # worker so a pending cancellation can bypass stalled
-                    # thread-store IO and still reach run_agent's startup
-                    # barrier / stream finalization.
+                    # 持久化接纳与任务挂载之间不允许出现 await。元数据设置在已挂载的
+                    # 工作器内部执行，使待处理取消能够绕过卡住的线程存储 IO，仍然到达
+                    # run_agent 的启动屏障/流终结流程。
                     record.task = asyncio.create_task(worker)
                 except Exception as exc:
                     worker.close()
@@ -2129,9 +2102,8 @@ async def start_run(
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
 
-        # Title sync is handled by worker.py's finally block which reads the
-        # title from the checkpoint and calls thread_store.update_display_name
-        # after the run completes.
+        # 标题同步由 worker.py 的 finally 块处理：它从检查点读取标题，并在运行完成后
+        # 调用 thread_store.update_display_name。
 
         return record
     finally:
